@@ -1,5 +1,7 @@
 # STM32F103 ile hall sensörlü BLDC sürücü (altı adım)
 
+> [TECH-OHM](https://tech-ohm.com) açık kaynak projesi
+
 Blue Pill (STM32F103C8) üzerinde çalışan, hall sensörlü fırçasız DC motoru altı adımlı komutasyonla süren yazılım. Hız bir pedal potansiyometresinden, yön bir anahtardan geliyor. Elektrikli araç ve e-bisiklet sürücülerinin en sade hali diyebilirim: akım kontrolü yok, sadece gerilim (duty) kontrolü var.
 
 ## Blok diyagram
@@ -94,4 +96,10 @@ MIT. `Drivers` klasöründeki STM32 HAL ve CMSIS dosyaları kendi lisanslarıyla
 
 ## Yazar
 
-Gömülü Sistem Mühendisi M. Eyüb Can, [TECH-OHM](https://tech-ohm.com)
+Gömülü Sistem Mühendisi M. Eyüb Can, [TECH-OHM](https://tech-ohm.com) kurucusu
+
+## TECH-OHM
+
+[TECH-OHM](https://tech-ohm.com) elektronik kart ve gömülü yazılım tasarlayan bir mühendislik firması. Fikirden seri üretime kadar tasarım işi alıyor, TECH-OHM Akademi'de 12 aylık gömülü sistem eğitimi ve şirketlere özel danışmanlık veriyor.
+
+Web: [tech-ohm.com](https://tech-ohm.com) · E-posta: info@tech-ohm.com
