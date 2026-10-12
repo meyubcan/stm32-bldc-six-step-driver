@@ -1,47 +1,51 @@
-# STM32F103 ile hall sensörlü BLDC sürücü (altı adım)
+# Hall-sensored BLDC motor driver with six-step commutation
 
-> [TECH-OHM](https://tech-ohm.com) açık kaynak projesi
+STM32F103 · TIM1 PWM · hall interrupts · throttle and direction inputs
 
-Blue Pill (STM32F103C8) üzerinde çalışan, hall sensörlü fırçasız DC motoru altı adımlı komutasyonla süren yazılım. Hız bir pedal potansiyometresinden, yön bir anahtardan geliyor. Elektrikli araç ve e-bisiklet sürücülerinin en sade hali diyebilirim: akım kontrolü yok, sadece gerilim (duty) kontrolü var.
+![MCU](https://img.shields.io/badge/MCU-STM32F103C8-03234B?logo=stmicroelectronics&logoColor=white) ![IDE](https://img.shields.io/badge/IDE-STM32CubeIDE-2ea44f) ![License](https://img.shields.io/badge/license-MIT-blue) [![TECH-OHM](https://img.shields.io/badge/by-TECH--OHM-FFD400)](https://tech-ohm.com)
 
-## Blok diyagram
+**English** | [Türkçe](README.tr.md) · An open-source project by [TECH-OHM](https://tech-ohm.com)
+
+Firmware for a Blue Pill (STM32F103C8) that drives a hall-sensored brushless DC motor with six-step commutation. Speed comes from a throttle potentiometer and direction from a switch. Think of it as the simplest form of an e-bike or light EV controller: there is no current loop, only voltage (duty) control.
+
+## Block diagram
 
 ```mermaid
 flowchart LR
-    POT[Pedal potansiyometresi] -- "ADC1 IN0" --> MCU[STM32F103C8]
-    SW[Yön anahtarı] -- PA2 --> MCU
-    HALL[Hall A, B, C] -- "PB5, PB6, PB7, kesme" --> MCU
-    MCU -- "TIM1 CH1-3, 20 kHz PWM" --> HS[Üst kol sürücüleri]
-    MCU -- "PA5, PA6, PA7" --> LS[Alt kol sürücüleri]
-    HS --> INV[3 fazlı köprü, 6 MOSFET]
+    POT[Throttle potentiometer] -- "ADC1 IN0" --> MCU[STM32F103C8]
+    SW[Direction switch] -- PA2 --> MCU
+    HALL[Hall A, B, C] -- "PB5, PB6, PB7, interrupt" --> MCU
+    MCU -- "TIM1 CH1-3, 20 kHz PWM" --> HS[High-side drivers]
+    MCU -- "PA5, PA6, PA7" --> LS[Low-side drivers]
+    HS --> INV[3-phase bridge, 6 MOSFETs]
     LS --> INV
     INV --> M((BLDC motor))
     M -.-> HALL
 ```
 
-## Pinler
+## Pins
 
-| Pin | Görev | Açıklama |
+| Pin | Function | Notes |
 |---|---|---|
-| PA0 | Pedal | ADC1 kanal 0, 0 ile 3.3 V |
-| PA2 | Yön | 0 ileri, 1 geri. Sadece motor dururken okunur |
-| PA8 | A fazı üst kol | TIM1 CH1, PWM |
-| PA9 | B fazı üst kol | TIM1 CH2, PWM |
-| PA10 | C fazı üst kol | TIM1 CH3, PWM |
-| PA5 | A fazı alt kol | GPIO, adım boyunca sürekli açık |
-| PA6 | B fazı alt kol | GPIO |
-| PA7 | C fazı alt kol | GPIO |
-| PB5 | Hall A | iki kenarda kesme |
-| PB6 | Hall B | iki kenarda kesme |
-| PB7 | Hall C | iki kenarda kesme |
+| PA0 | Throttle | ADC1 channel 0, 0 to 3.3 V |
+| PA2 | Direction | 0 forward, 1 reverse. Read only while the motor is stopped |
+| PA8 | Phase A high side | TIM1 CH1, PWM |
+| PA9 | Phase B high side | TIM1 CH2, PWM |
+| PA10 | Phase C high side | TIM1 CH3, PWM |
+| PA5 | Phase A low side | GPIO, on for the whole step |
+| PA6 | Phase B low side | GPIO |
+| PA7 | Phase C low side | GPIO |
+| PB5 | Hall A | interrupt on both edges |
+| PB6 | Hall B | interrupt on both edges |
+| PB7 | Hall C | interrupt on both edges |
 
-MOSFET'leri doğrudan işlemci pini süremez. Arada kapı sürücüsü (IR2101 benzeri) olmalı.
+MCU pins cannot drive the MOSFETs directly. You need gate drivers in between (IR2101 or similar).
 
-## Komutasyon
+## Commutation
 
-Her adımda bir fazın üst kolu PWM ile, başka bir fazın alt kolu sürekli açılıyor. Üçüncü faz boşta kalıyor. İleri yönde hall koduna karşılık gelen adımlar:
+In each step one phase gets PWM on its high side, another phase has its low side fully on, and the third phase floats. Forward direction:
 
-| Hall (A B C) | Adım | Üst kol, PWM | Alt kol |
+| Hall (A B C) | Step | High side, PWM | Low side |
 |---|---|---|---|
 | 1 0 1 | 1 | A | B |
 | 1 0 0 | 2 | A | C |
@@ -50,56 +54,56 @@ Her adımda bir fazın üst kolu PWM ile, başka bir fazın alt kolu sürekli a�
 | 0 1 1 | 5 | C | A |
 | 0 0 1 | 6 | C | B |
 
-Geri yönde aynı hall kodu için üç adım kaymış olan uygulanıyor (1 yerine 4, 2 yerine 5 gibi). 000 ve 111 geçersiz kod, bu durumda bütün çıkışlar kapanıyor.
+In reverse, the same hall code selects the step three positions away (4 instead of 1, 5 instead of 2). Codes 000 and 111 are invalid and switch all outputs off.
 
-Tablo `main.c` içinde `hall_to_step` ve `commutation` dizilerinde duruyor. Hall sırası motordan motora değişir. Motor titreyip dönmüyorsa önce hall kablolarının sırasını, sonra faz kablolarını değiştirerek dene.
+The tables are `hall_to_step` and `commutation` in `main.c`. Hall order differs between motors. If the motor shudders instead of turning, swap hall wires first, then phase wires.
 
-## Nasıl çalışıyor
+## How it works
 
-Hall sensörlerinden biri seviye değiştirdiğinde kesme geliyor ve `commutate()` yeni adımı uyguluyor. Aynı fonksiyon ana döngüden de milisaniyede bir çağrılıyor. Bunun iki sebebi var: pedal değiştiğinde duty hemen güncelleniyor ve motor dururken kesme gelmediği için kalkış da buradan sağlanıyor. Hall sensörleri dururken de konumu verdiği için ayrıca açık çevrim kalkış rutini yazmaya gerek kalmadı.
+When a hall sensor changes level an interrupt fires and `commutate()` applies the new step. The same function is also called from the main loop every millisecond, for two reasons: the duty follows the throttle immediately, and it starts the motor from standstill, where no interrupts arrive. Hall sensors report position even when the rotor is not moving, so no separate open-loop start routine is needed.
 
-Bir fazın üst ve alt kolu hiçbir adımda aynı anda iletimde değil ve bir fazın üstten alta geçişi arasında her zaman boşta kaldığı bir adım var. Bu yüzden yazılımda ölü zaman eklemedim.
+The high and low side of one phase are never on in the same step, and a phase always passes through a floating step when going from high to low. For that reason I did not add software dead time.
 
-Pedal 150 değerini geçince motor kalkıyor, 100'ün altına inince bütün çıkışlar kapanıyor. Aradaki fark, pedal eşikte titrerken sürücünün açılıp kapanmasını önlüyor.
+The motor starts when the throttle passes 150 counts and all outputs switch off below 100. The gap keeps the driver from toggling when the throttle hovers at the threshold.
 
-## Ayarlar
+## Settings
 
-`main.c` başındaki sabitler:
+Constants at the top of `main.c`:
 
-| Sabit | Değer | Anlamı |
+| Constant | Value | Meaning |
 |---|---|---|
-| `PWM_STEPS` | 100 | duty çözünürlüğü |
-| `PWM_PRESCALER` | 3 | 8 MHz saatle 20 kHz PWM |
-| `DUTY_MAX` | 95 | bootstrap sürücüler %100'de üst kolu tutamadığı için sınır |
-| `THROTTLE_START` | 150 | kalkış eşiği (12 bit ADC) |
-| `THROTTLE_STOP` | 100 | durma eşiği |
+| `PWM_STEPS` | 100 | duty resolution |
+| `PWM_PRESCALER` | 3 | 20 kHz PWM from the 8 MHz clock |
+| `DUTY_MAX` | 95 | bootstrap drivers cannot hold the high side at 100% |
+| `THROTTLE_START` | 150 | start threshold (12-bit ADC) |
+| `THROTTLE_STOP` | 100 | stop threshold |
 
-PWM zaman tabanı, hall kesmeleri ve SWD ayarı `motor_hw_init()` içinde elle yapılıyor. `.ioc` dosyasını yeniden üretsen de bu ayarlar bozulmaz.
+The PWM time base, hall interrupts and SWD are set up by hand in `motor_hw_init()`, so regenerating code from the `.ioc` file does not change them.
 
-## Derleme
+## Build
 
-STM32CubeIDE'de `File > Import > Existing Projects into Workspace` ile klasörü seç, derle ve karta yükle. İşlemci dahili 8 MHz osilatörle çalışıyor, kristal gerekmiyor.
+In STM32CubeIDE use `File > Import > Existing Projects into Workspace` and select this folder. The MCU runs from the internal 8 MHz oscillator, no crystal needed.
 
-## Eksikler
+## Limitations
 
-- Akım ölçümü ve aşırı akım koruması yok. İlk denemeyi akım sınırlı bir kaynakla yap.
-- Hız çevrimi yok, pedal doğrudan duty'yi belirliyor.
-- Fren ve geri kazanım yok, pedal bırakılınca motor serbest dönüyor.
+- No current sensing and no over-current protection. Run the first test from a current-limited supply.
+- No speed loop. The throttle sets the duty directly.
+- No braking or regeneration. The motor coasts when the throttle is released.
 
-## Durum
+## Status
 
-Kodu toparladıktan sonra motor üzerinde henüz denemedim. Derleniyor, ama güç katına bağlamadan önce çıkışları osiloskopla kontrol etmeni öneririm.
+I have not run this cleaned-up version on a motor yet. It builds, but check the outputs with an oscilloscope before connecting a power stage.
 
-## Lisans
+## License
 
-MIT. `Drivers` klasöründeki STM32 HAL ve CMSIS dosyaları kendi lisanslarıyla gelir.
+MIT. The STM32 HAL and CMSIS files under `Drivers` keep their own licenses.
 
-## Yazar
+## Author
 
-Gömülü Sistem Mühendisi M. Eyüb Can, [TECH-OHM](https://tech-ohm.com) kurucusu
+M. Eyüb Can, embedded systems engineer and founder of [TECH-OHM](https://tech-ohm.com)
 
-## TECH-OHM
+## About TECH-OHM
 
-[TECH-OHM](https://tech-ohm.com) elektronik kart ve gömülü yazılım tasarlayan bir mühendislik firması. Fikirden seri üretime kadar tasarım işi alıyor, TECH-OHM Akademi'de 12 aylık gömülü sistem eğitimi ve şirketlere özel danışmanlık veriyor.
+[TECH-OHM](https://tech-ohm.com) designs electronic boards and embedded software, from the first schematic to series production. We also run a 12-month embedded systems training program and consult for engineering teams.
 
-Web: [tech-ohm.com](https://tech-ohm.com) · E-posta: info@tech-ohm.com
+Web: [tech-ohm.com](https://tech-ohm.com) · Email: info@tech-ohm.com
