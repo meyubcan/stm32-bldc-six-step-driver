@@ -26,23 +26,23 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-/* Faz indeksleri. Ust kol TIM1 kanali, alt kol GPIOA pini. */
+/* Phase indexes. High side is a TIM1 channel, low side is a GPIOA pin. */
 typedef enum { PHASE_A = 0, PHASE_B, PHASE_C } phase_t;
 
 typedef struct {
-  phase_t high;   /* PWM uygulanan ust kol */
-  phase_t low;    /* surekli iletimde tutulan alt kol */
+  phase_t high;   /* high side, gets the PWM */
+  phase_t low;    /* low side, held on for the whole step */
 } step_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PWM_STEPS          100U   /* duty cozunurlugu, TIM1 ARR = PWM_STEPS - 1 */
+#define PWM_STEPS          100U   /* duty resolution, TIM1 ARR = PWM_STEPS - 1 */
 #define PWM_PRESCALER      3U     /* 8 MHz / (3 + 1) / 100 = 20 kHz */
-#define DUTY_MAX           95U    /* bootstrap suruculer %100 duty'de ust kolu tutamaz */
+#define DUTY_MAX           95U    /* bootstrap drivers cannot hold the high side at 100% duty */
 
-#define THROTTLE_START     150U   /* pedal bu degeri gecince motor kalkar (12 bit ADC) */
-#define THROTTLE_STOP      100U   /* bu degerin altinda cikislar kapanir */
+#define THROTTLE_START     150U   /* motor starts above this throttle value (12-bit ADC) */
+#define THROTTLE_STOP      100U   /* outputs switch off below this value */
 #define THROTTLE_FULL      4095U
 /* USER CODE END PD */
 
@@ -57,9 +57,9 @@ ADC_HandleTypeDef hadc1;
 TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN PV */
-/* Komutasyon tablosu. Adim 0 "hepsi kapali" demek. */
+/* Commutation table. Step 0 means everything off. */
 static const step_t commutation[7] = {
-  { PHASE_A, PHASE_A },   /* 0: kullanilmiyor */
+  { PHASE_A, PHASE_A },   /* 0: not used */
   { PHASE_A, PHASE_B },   /* 1: AH + BL */
   { PHASE_A, PHASE_C },   /* 2: AH + CL */
   { PHASE_B, PHASE_C },   /* 3: BH + CL */
@@ -68,8 +68,8 @@ static const step_t commutation[7] = {
   { PHASE_C, PHASE_B },   /* 6: CH + BL */
 };
 
-/* Hall kodu (A<<2 | B<<1 | C) -> ileri yonde komutasyon adimi.
- * 000 ve 111 gecersiz, sensor kablosu kopuksa bu kodlar gelir. */
+/* Hall code (A<<2 | B<<1 | C) -> commutation step in the forward direction.
+ * 000 and 111 are invalid. You get them when a sensor wire is broken. */
 static const uint8_t hall_to_step[8] = { 0, 6, 4, 5, 2, 1, 3, 0 };
 
 static const uint32_t pwm_channel[3] = { TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3 };
@@ -77,8 +77,8 @@ static const uint16_t low_pin[3]     = { GPIO_PIN_5, GPIO_PIN_6, GPIO_PIN_7 };
 
 static volatile uint32_t pwm_duty = 0;   /* 0..DUTY_MAX */
 static volatile uint8_t  running  = 0;
-static volatile uint8_t  reverse  = 0;   /* 0: ileri, 1: geri */
-static uint32_t pedal = 0;               /* filtrelenmis ADC degeri */
+static volatile uint8_t  reverse  = 0;   /* 0: forward, 1: reverse */
+static uint32_t pedal = 0;               /* filtered ADC value */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -96,8 +96,8 @@ static uint32_t read_pedal(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* CubeMX ayarlarinin uzerine yazilan kisim. PWM zaman tabani, hall kesmeleri
- * ve SWD burada elle kuruluyor, boylece .ioc yeniden uretilse de ayni kalir. */
+/* Settings that override what CubeMX generates. The PWM time base, the hall
+ * interrupts and SWD are set here by hand, so regenerating the .ioc keeps them. */
 static void motor_hw_init(void)
 {
   GPIO_InitTypeDef gpio = {0};
@@ -107,7 +107,7 @@ static void motor_hw_init(void)
   __HAL_TIM_SET_AUTORELOAD(&htim1, PWM_STEPS - 1U);
   htim1.Instance->EGR = TIM_EGR_UG;
 
-  /* Hall girisleri iki kenarda da kesme uretmeli, yoksa 6 adimin 3'u kacar */
+  /* Hall inputs must interrupt on both edges, otherwise 3 of the 6 steps are missed */
   gpio.Pin  = HALL_A_Pin | HALL_B_Pin | HALL_C_Pin;
   gpio.Mode = GPIO_MODE_IT_RISING_FALLING;
   gpio.Pull = GPIO_PULLUP;
@@ -115,7 +115,7 @@ static void motor_hw_init(void)
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 1, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-  /* JTAG kapali, SWD acik kalsin (kart tekrar programlanabilsin) */
+  /* JTAG off, SWD stays on so the board can be reprogrammed */
   __HAL_AFIO_REMAP_SWJ_NOJTAG();
 }
 
@@ -127,8 +127,8 @@ static void outputs_off(void)
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0);
 }
 
-/* Once kullanilmayan kollar kapatilir, sonra yeni adimin kollari acilir.
- * Bir fazin ust ve alt kolu ayni anda hicbir adimda iletimde degil. */
+/* Unused switches go off first, then the switches of the new step come on.
+ * No step has the high and low side of the same phase on together. */
 static void apply_step(uint8_t step, uint32_t duty)
 {
   if (step < 1U || step > 6U) {
@@ -146,8 +146,8 @@ static void apply_step(uint8_t step, uint32_t duty)
   __HAL_TIM_SET_COMPARE(&htim1, pwm_channel[s->high], duty);
 }
 
-/* Hall sensorlerini okur ve rotorun o anki konumuna uyan adimi uygular.
- * Motor dururken de calisir, bu yuzden ayrica acik cevrim kalkis gerekmiyor. */
+/* Reads the hall sensors and applies the step that matches the rotor position.
+ * It works at standstill too, so no separate open-loop start is needed. */
 static void commutate(void)
 {
   uint8_t hall = 0;
@@ -158,7 +158,7 @@ static void commutate(void)
 
   uint8_t step = hall_to_step[hall];
 
-  /* Geri yonde ayni hall kodu icin 180 derece kaymis adim uygulanir */
+  /* In reverse the same hall code selects the step 180 degrees away */
   if (step != 0U && reverse) {
     step = (uint8_t)(((step + 2U) % 6U) + 1U);
   }
@@ -166,7 +166,7 @@ static void commutate(void)
   apply_step(running ? step : 0U, pwm_duty);
 }
 
-/* Pedal potansiyometresi. Tek ornek gurultulu oldugu icin 1/8 IIR filtre var. */
+/* Throttle potentiometer. A single sample is noisy, hence the 1/8 IIR filter. */
 static uint32_t read_pedal(void)
 {
   HAL_ADC_Start(&hadc1);
@@ -233,7 +233,7 @@ int main(void)
     uint32_t throttle = read_pedal();
 
     if (!running && throttle >= THROTTLE_START) {
-      /* Yon sadece motor dururken okunur, donerken vites degismez */
+      /* Direction is read only at standstill. It cannot change while the motor turns. */
       reverse = (HAL_GPIO_ReadPin(vites_GPIO_Port, vites_Pin) == GPIO_PIN_SET);
       running = 1;
     } else if (running && throttle < THROTTLE_STOP) {
@@ -246,8 +246,8 @@ int main(void)
       pwm_duty = 0;
     }
 
-    /* Duty'yi guncellemek ve motor takilirsa yeniden denemek icin komutasyon
-     * ana donguden de cagrilir. Hall kesmesiyle cakismasin diye kesme kapatilir. */
+    /* Commutation also runs from the main loop, to update the duty and to retry
+     * if the motor stalls. The hall interrupt is masked so the two cannot collide. */
     HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
     commutate();
     HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
@@ -462,7 +462,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-/* CubeMX'te hall pinlerinin NVIC kesmesi isaretli olmadigi icin isleyici burada */
+/* The hall pins have no NVIC interrupt enabled in CubeMX, so the handler lives here */
 void EXTI9_5_IRQHandler(void)
 {
   HAL_GPIO_EXTI_IRQHandler(HALL_A_Pin);
